@@ -108,7 +108,9 @@ def run_strategy(df: pd.DataFrame,
 
     qqq_tr = true_range(df, R)
     df["QQQ_ATR"] = qqq_tr.ewm(alpha=1 / length_in, adjust=False).mean()
-    df["QQQ_Vol"] = df["QQQ_ATR"].rolling(window=int(length_in * 3)).max() * mult_in
+    # ★ 동적 변동성 밴드: rolling(315).max()는 변동성 피크 후 315일간 밴드가 고정되어
+    #   레짐 필터가 마비(Regime Paralysis)됨. ATR 단독 곱연산으로 동적 반영.
+    df["QQQ_Vol"] = df["QQQ_ATR"] * mult_in
     # 상단 돌파 시 상승장 진입 / 하단 이탈 시 하락장 진입 (사이 구간은 이전 레짐 유지)
     # ★ 대칭 완충지대: [ZLEMA - Vol, ZLEMA + Vol] (기존 Lower=ZLEMA 비대칭 수정)
     df["Upper_In"] = df["ZLEMA_In"] + df["QQQ_Vol"]
@@ -127,6 +129,7 @@ def run_strategy(df: pd.DataFrame,
     curr_asset: str = C.INIT_ASSET      # 'BIL'
     curr_regime: str = "BEAR"
     highest_high: float = 0.0
+    holding_days: int = 0               # ★ 보유 기간 카운터 (진입 당일 손절 스킵용)
     last_info: dict = {}
 
     for i in range(size):
@@ -178,9 +181,11 @@ def run_strategy(df: pd.DataFrame,
             # ★ 샹들리에 앵커: 실행은 다음날 시가 진입이므로, highest_high를 0으로 두고
             #   다음날 branch [C]에서 진입일 고가로 앵커링 (시그널일 고가 사용 시 손절선 왜곡 방지)
             highest_high = 0.0
+            holding_days = 0            # ★ 진입일 카운터 리셋
 
         else:
             # [C] 동일 레짐 내 샹들리에 손절선 검증
+            holding_days += 1           # ★ 보유 일수 증가
             asset_high = df[f"{curr_asset}_High"].iloc[i]
             asset_close = df[f"{curr_asset}_Close"].iloc[i]
             asset_atr = df[f"{curr_asset}_ATR_Out"].iloc[i]
@@ -190,8 +195,9 @@ def run_strategy(df: pd.DataFrame,
 
             chandelier_line = highest_high - (asset_atr * mult_out)
 
-            # 손절선 붕괴 시
-            if asset_close < chandelier_line:
+            # ★ 진입 당일(holding_days==1)에는 손절 판정 스킵 — 윗꼬리 휩쏘 방지.
+            #   진입일은 고가만 앵커링하고, 다음날부터 손절선 검증.
+            if holding_days > 1 and asset_close < chandelier_line:
                 exited_from = curr_asset
                 exited = True
                 if curr_regime == "BULL":
@@ -222,6 +228,7 @@ def run_strategy(df: pd.DataFrame,
                 # ★ 손절 교체도 다음날 시가 진입이므로 highest_high를 0으로 두고
                 #   다음날 branch [C]에서 진입일 고가로 앵커링
                 highest_high = 0.0
+                holding_days = 0        # ★ 교체 후 진입일 카운터 리셋
 
         # 마지막 날 결정 정보 캡처(근거 문장용)
         # ★ 실행 포지션은 Target_Asset(=Chosen_Asset.shift(1)) 기준이므로,
@@ -248,28 +255,34 @@ def run_strategy(df: pd.DataFrame,
 
     # 4. 일별 수익률 합산 및 왕복 수수료 차감 정산
     # ★ 시가 진입 모델 (전일 종가 시그널 → 당일 시가 체결):
-    #   - 전환일: 시그널 후 당일 시가에 새 자산 매수 → 당일 종가 청산
-    #             수익률 = close[i] / open[i] − 1  (전일종가→당일시가 갭 미노출)
+    #   - 전환일: 기존 자산을 전일종가→당일시가에 매도(오버나이트) + 신규 자산을
+    #             당일시가→당일종가에 보유(인트라데이) → 복리 결합. 왕복 수수료 차감.
     #   - 유지일: 전일 종가 보유분 그대로 → close[i] / close[i-1] − 1
     for asset in [R, C.ATTACK_TICKERS[0]] + all_assets:
         df[f"{asset}_RetClose"] = df[f"{asset}_Close"].pct_change()          # 유지일
-        df[f"{asset}_RetOpen"] = df[f"{asset}_Close"] / df[f"{asset}_Open"] - 1  # 전환일
+        df[f"{asset}_RetOpen"] = df[f"{asset}_Close"] / df[f"{asset}_Open"] - 1  # 인트라데이
 
-    strat_returns: list[float] = []
+    strat_returns: list[float] = [0.0] * size
     prev_target: str | None = None
-    for i in range(size):
+    for i in range(1, size):
         target = df["Target_Asset"].iloc[i]
         if pd.isna(target):
-            strat_returns.append(0.0)
+            strat_returns[i] = 0.0
             continue
-        # ★ 첫 유효일은 개념상 이미 보유(INIT_ASSET) 중이므로 close-to-close 유지일로 처리
-        is_entry = (prev_target is not None and target != prev_target)
-        if is_entry:
-            asset_ret = df[f"{target}_RetOpen"].iloc[i]
+        if prev_target is None:
+            # ★ 첫 유효일: 개념상 이미 보유(INIT_ASSET) 중이므로 close-to-close 유지일로 처리
+            strat_returns[i] = df[f"{target}_RetClose"].iloc[i]
+            prev_target = target
+            continue
+        if target != prev_target:
+            # ★ 전환일: 기존 자산 오버나이트(전일종가→당일시가) + 신규 자산 인트라데이(당일시가→당일종가)
+            r_overnight = (df[f"{prev_target}_Open"].iloc[i]
+                           / df[f"{prev_target}_Close"].iloc[i - 1]) - 1.0
+            r_intraday = df[f"{target}_RetOpen"].iloc[i]
+            strat_returns[i] = (1 + r_overnight) * (1 + r_intraday) - 1.0 - fee_rate
         else:
-            asset_ret = df[f"{target}_RetClose"].iloc[i]
-        friction = fee_rate if (prev_target is not None and target != prev_target) else 0.0
-        strat_returns.append(asset_ret - friction)
+            # 유지일
+            strat_returns[i] = df[f"{target}_RetClose"].iloc[i]
         prev_target = target
 
     df["Strategy_Return"] = strat_returns
