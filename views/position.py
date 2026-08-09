@@ -55,7 +55,7 @@ except Exception as e:
     st.stop()
 
 R = C.REGIME_TICKER
-target_today = str(df["Chosen_Asset"].iloc[-1]) if pd.notna(df["Chosen_Asset"].iloc[-1]) else C.INIT_ASSET
+target_today = str(df["Target_Asset"].iloc[-1]) if pd.notna(df["Target_Asset"].iloc[-1]) else C.INIT_ASSET
 last_close_date = str(df.index[-1].date())
 reason = engine.build_reason(info)
 

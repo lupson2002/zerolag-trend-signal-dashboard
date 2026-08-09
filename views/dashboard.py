@@ -66,8 +66,8 @@ R = C.REGIME_TICKER
 ATTACK = C.ATTACK_TICKERS[0]
 
 strat_ret = df["Strategy_Return"].fillna(0)
-qqq_ret = df[f"{R}_Ret"].fillna(0)
-qld_ret = df[f"{ATTACK}_Ret"].fillna(0)
+qqq_ret = df[f"{R}_RetClose"].fillna(0)
+qld_ret = df[f"{ATTACK}_RetClose"].fillna(0)
 
 strat_eq = equity_curve(strat_ret)
 qqq_eq = equity_curve(qqq_ret)
@@ -80,7 +80,7 @@ qld_stats = perf_stats(qld_ret, qld_eq)
 strat_yearly = yearly_returns(strat_ret)
 qqq_yearly = yearly_returns(qqq_ret)
 
-target_today = str(df["Chosen_Asset"].iloc[-1]) if pd.notna(df["Chosen_Asset"].iloc[-1]) else C.INIT_ASSET
+target_today = str(df["Target_Asset"].iloc[-1]) if pd.notna(df["Target_Asset"].iloc[-1]) else C.INIT_ASSET
 last_close_date = str(df.index[-1].date())
 reason = engine.build_reason(info)
 

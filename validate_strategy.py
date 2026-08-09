@@ -73,8 +73,8 @@ def section_baseline(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
-    qld_ret = df[f"{C.ATTACK_TICKERS[0]}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
+    qld_ret = df[f"{C.ATTACK_TICKERS[0]}_RetClose"].fillna(0)
 
     rows = {
         "ZeroLag 전략": perf_stats(strat_ret),
@@ -103,7 +103,7 @@ def section_alpha(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
     excess = strat_ret - qqq_ret
     excess = excess.dropna()
 
@@ -140,7 +140,7 @@ def section_quality(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
 
     s = perf_stats(strat_ret)
     b = perf_stats(qqq_ret)
@@ -172,7 +172,7 @@ def section_regime(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
 
     # Chosen_Asset 기반으로 국면 추정 (공격 자산 보유 = BULL)
     attack_set = set(C.ATTACK_TICKERS)
@@ -235,7 +235,7 @@ def section_rolling(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
 
     window = 252 * 3
     strat_cagr = strat_ret.rolling(window).apply(
@@ -263,7 +263,7 @@ def section_excess_curve(df: pd.DataFrame) -> None:
     print(SEP)
 
     strat_ret = df["Strategy_Return"].fillna(0)
-    qqq_ret = df[f"{C.REGIME_TICKER}_Ret"].fillna(0)
+    qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
     excess = strat_ret - qqq_ret
     cum_excess = (1 + excess).cumprod()
 

@@ -65,6 +65,7 @@ def build_master(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
     for t in C.PRICE_TICKERS:
         d = data[t].reindex(idx)
         master[f"{t}_Close"] = d["Close"]
+        master[f"{t}_Open"] = d["Open"]
         master[f"{t}_High"] = d["High"]
         master[f"{t}_Low"] = d["Low"]
     return master.dropna()
@@ -159,8 +160,14 @@ def run_strategy(df: pd.DataFrame,
                 mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in attack_assets}
                 curr_asset = max(mom_scores, key=mom_scores.get)
             else:
-                mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in def_assets}
-                curr_asset = max(mom_scores, key=mom_scores.get)
+                # ★ 양수 모멘텀 필터: 양수 모멘텀 방어 자산만 후보, 없으면 현금(BIL) 대피
+                pos = [a for a in def_assets
+                       if pd.notna(df[f"{a}_Mom"].iloc[i]) and df[f"{a}_Mom"].iloc[i] > 0]
+                if pos:
+                    mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in pos}
+                    curr_asset = max(mom_scores, key=mom_scores.get)
+                else:
+                    curr_asset = "BIL"
             highest_high = df[f"{curr_asset}_High"].iloc[i]
 
         else:
@@ -194,8 +201,14 @@ def run_strategy(df: pd.DataFrame,
                         curr_asset = alt_asset
                 else:
                     remains = [a for a in def_assets if a != curr_asset]
-                    mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in remains}
-                    curr_asset = max(mom_scores, key=mom_scores.get)
+                    # ★ 양수 모멘텀 필터: 양수 모멘텀 자산만 후보, 없으면 현금(BIL) 대피
+                    pos = [a for a in remains
+                           if pd.notna(df[f"{a}_Mom"].iloc[i]) and df[f"{a}_Mom"].iloc[i] > 0]
+                    if pos:
+                        mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in pos}
+                        curr_asset = max(mom_scores, key=mom_scores.get)
+                    else:
+                        curr_asset = "BIL"
 
                 highest_high = df[f"{curr_asset}_High"].iloc[i]  # ★ 손절 교체 시에만 리셋(코랩 준용)
 
@@ -221,8 +234,13 @@ def run_strategy(df: pd.DataFrame,
     df["Target_Asset"] = df["Chosen_Asset"].shift(1)
 
     # 4. 일별 수익률 합산 및 왕복 수수료 차감 정산
+    # ★ 시가 진입 모델 (전일 종가 시그널 → 당일 시가 체결):
+    #   - 전환일: 시그널 후 당일 시가에 새 자산 매수 → 당일 종가 청산
+    #             수익률 = close[i] / open[i] − 1  (전일종가→당일시가 갭 미노출)
+    #   - 유지일: 전일 종가 보유분 그대로 → close[i] / close[i-1] − 1
     for asset in [R, C.ATTACK_TICKERS[0]] + all_assets:
-        df[f"{asset}_Ret"] = df[f"{asset}_Close"].pct_change()
+        df[f"{asset}_RetClose"] = df[f"{asset}_Close"].pct_change()          # 유지일
+        df[f"{asset}_RetOpen"] = df[f"{asset}_Close"] / df[f"{asset}_Open"] - 1  # 전환일
 
     strat_returns: list[float] = []
     prev_target: str | None = None
@@ -230,15 +248,20 @@ def run_strategy(df: pd.DataFrame,
         target = df["Target_Asset"].iloc[i]
         if pd.isna(target):
             strat_returns.append(0.0)
+            continue
+        is_entry = (prev_target is None or target != prev_target)
+        if is_entry:
+            asset_ret = df[f"{target}_RetOpen"].iloc[i]
         else:
-            asset_ret = df[f"{target}_Ret"].iloc[i]
-            friction = fee_rate if (prev_target is not None and target != prev_target) else 0.0
-            strat_returns.append(asset_ret - friction)
-            prev_target = target
+            asset_ret = df[f"{target}_RetClose"].iloc[i]
+        friction = fee_rate if (prev_target is not None and target != prev_target) else 0.0
+        strat_returns.append(asset_ret - friction)
+        prev_target = target
 
     df["Strategy_Return"] = strat_returns
-    df["Cum_QQQ"] = (1 + df[f"{R}_Ret"].fillna(0)).cumprod()
-    df["Cum_QLD"] = (1 + df[f"{C.ATTACK_TICKERS[0]}_Ret"].fillna(0)).cumprod()
+    # 벤치마크는 순수 종가 기준 바이앤홀드 (close→close)
+    df["Cum_QQQ"] = (1 + df[f"{R}_RetClose"].fillna(0)).cumprod()
+    df["Cum_QLD"] = (1 + df[f"{C.ATTACK_TICKERS[0]}_RetClose"].fillna(0)).cumprod()
     df["Cum_Strategy"] = (1 + df["Strategy_Return"].fillna(0)).cumprod()
 
     return df, last_info
@@ -307,7 +330,8 @@ def build_result(df: pd.DataFrame, info: dict) -> BacktestResult:
     """
     s_cagr, s_sharpe, s_mdd = get_performance_metrics(df["Cum_Strategy"], df["Strategy_Return"])
 
-    target_today = str(df["Chosen_Asset"].iloc[-1]) if pd.notna(df["Chosen_Asset"].iloc[-1]) else C.INIT_ASSET
+    # 오늘 실행 포지션 = Target_Asset(shift(1)) 의 마지막 값 (전일 종가 시그널 → 오늘 시가 진입)
+    target_today = str(df["Target_Asset"].iloc[-1]) if pd.notna(df["Target_Asset"].iloc[-1]) else C.INIT_ASSET
     last_close_date = str(df.index[-1].date())
     reason = build_reason(info)
     n_days = int(df["Strategy_Return"].dropna().shape[0])
