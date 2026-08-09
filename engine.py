@@ -110,8 +110,9 @@ def run_strategy(df: pd.DataFrame,
     df["QQQ_ATR"] = qqq_tr.ewm(alpha=1 / length_in, adjust=False).mean()
     df["QQQ_Vol"] = df["QQQ_ATR"].rolling(window=int(length_in * 3)).max() * mult_in
     # 상단 돌파 시 상승장 진입 / 하단 이탈 시 하락장 진입 (사이 구간은 이전 레짐 유지)
+    # ★ 대칭 완충지대: [ZLEMA - Vol, ZLEMA + Vol] (기존 Lower=ZLEMA 비대칭 수정)
     df["Upper_In"] = df["ZLEMA_In"] + df["QQQ_Vol"]
-    df["Lower_In"] = df["ZLEMA_In"]
+    df["Lower_In"] = df["ZLEMA_In"] - df["QQQ_Vol"]
 
     # 2. 공격 2종(QLD, USD) + 방어 4종(TLT, BIL, USO, GLD) 55일 모멘텀 + 샹들리에 ATR(15)
     attack_assets = attack
@@ -157,8 +158,14 @@ def run_strategy(df: pd.DataFrame,
         # [B] 레짐 전환 시 자산 교체 (모멘텀 max) + highest_high 리셋
         if regime_changed:
             if curr_regime == "BULL":
-                mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in attack_assets}
-                curr_asset = max(mom_scores, key=mom_scores.get)
+                # ★ NaN 가드: 유효한 모멘텀 공격 자산만 후보 (BEAR 경로와 동일하게)
+                pos = [a for a in attack_assets
+                       if pd.notna(df[f"{a}_Mom"].iloc[i])]
+                if pos:
+                    mom_scores = {a: df[f"{a}_Mom"].iloc[i] for a in pos}
+                    curr_asset = max(mom_scores, key=mom_scores.get)
+                else:
+                    curr_asset = "BIL"
             else:
                 # ★ 양수 모멘텀 필터: 양수 모멘텀 방어 자산만 후보, 없으면 현금(BIL) 대피
                 pos = [a for a in def_assets
@@ -168,7 +175,9 @@ def run_strategy(df: pd.DataFrame,
                     curr_asset = max(mom_scores, key=mom_scores.get)
                 else:
                     curr_asset = "BIL"
-            highest_high = df[f"{curr_asset}_High"].iloc[i]
+            # ★ 샹들리에 앵커: 실행은 다음날 시가 진입이므로, highest_high를 0으로 두고
+            #   다음날 branch [C]에서 진입일 고가로 앵커링 (시그널일 고가 사용 시 손절선 왜곡 방지)
+            highest_high = 0.0
 
         else:
             # [C] 동일 레짐 내 샹들리에 손절선 검증
@@ -210,10 +219,14 @@ def run_strategy(df: pd.DataFrame,
                     else:
                         curr_asset = "BIL"
 
-                highest_high = df[f"{curr_asset}_High"].iloc[i]  # ★ 손절 교체 시에만 리셋(코랩 준용)
+                # ★ 손절 교체도 다음날 시가 진입이므로 highest_high를 0으로 두고
+                #   다음날 branch [C]에서 진입일 고가로 앵커링
+                highest_high = 0.0
 
         # 마지막 날 결정 정보 캡처(근거 문장용)
-        if i == size - 1:
+        # ★ 실행 포지션은 Target_Asset(=Chosen_Asset.shift(1)) 기준이므로,
+        #   오늘 실행 포지션의 근거는 size-2 일(어제 시그널)의 결정을 사용해야 정렬됨.
+        if i == max(size - 2, 0):
             last_info = {
                 "is_bull": curr_regime == "BULL",
                 "regime": curr_regime,
@@ -249,7 +262,8 @@ def run_strategy(df: pd.DataFrame,
         if pd.isna(target):
             strat_returns.append(0.0)
             continue
-        is_entry = (prev_target is None or target != prev_target)
+        # ★ 첫 유효일은 개념상 이미 보유(INIT_ASSET) 중이므로 close-to-close 유지일로 처리
+        is_entry = (prev_target is not None and target != prev_target)
         if is_entry:
             asset_ret = df[f"{target}_RetOpen"].iloc[i]
         else:

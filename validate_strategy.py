@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import itertools
 import sys
 from pathlib import Path
 
@@ -65,6 +64,37 @@ def fmt_metric(name: str, v: float) -> str:
     return f"{v:.1%}"
 
 
+def cum_excess_ratio(strat_ret: pd.Series, bench_ret: pd.Series) -> float:
+    """정확한 누적 초과수익 = 상대부(relative wealth) 비율 - 1.
+    산술차(strat-bench)를 복리화하는 대신 로그차분으로 정확히 계산.
+    """
+    strat_eq = (1 + strat_ret).cumprod()
+    bench_eq = (1 + bench_ret).cumprod()
+    return (strat_eq / bench_eq).iloc[-1] - 1
+
+
+def _newey_west_t(x: pd.Series) -> tuple[float, float]:
+    """Newey-West HAC t-통계량 (자기상관 보정). lag = n^(1/3) 근사."""
+    x = x.dropna().to_numpy()
+    n = len(x)
+    if n < 2:
+        return 0.0, 1.0
+    mean = x.mean()
+    resid = x - mean
+    # HAC 분산 (Bartlett kernel)
+    lag = int(np.floor(n ** (1 / 3)))
+    gamma0 = (resid @ resid) / n
+    var = gamma0
+    for l in range(1, lag + 1):
+        w = 1 - l / (lag + 1)
+        gamma_l = (resid[l:] @ resid[:-l]) / n
+        var += 2 * w * gamma_l
+    se = np.sqrt(var / n) if var > 0 else 0.0
+    t = mean / se if se > 0 else 0.0
+    p = 2 * (1 - stats.t.cdf(abs(t), df=n - 1))
+    return t, p
+
+
 # ── 1) 기본 성과 ──────────────────────────────────────────────────
 
 def section_baseline(df: pd.DataFrame) -> None:
@@ -88,10 +118,9 @@ def section_baseline(df: pd.DataFrame) -> None:
     print(table.to_string())
     print()
 
-    # 전략 vs QQQ 초과수익
-    excess = strat_ret - qqq_ret
-    print(f"전략 vs QQQ 누적 초과수익: {fmt_pct((1 + excess).prod() - 1)}")
-    print(f"전략 vs QLD 누적 초과수익: {fmt_pct((1 + (strat_ret - qld_ret)).prod() - 1)}")
+    # 전략 vs QQQ 초과수익 (정확한 상대부 비율)
+    print(f"전략 vs QQQ 누적 초과수익: {fmt_pct(cum_excess_ratio(strat_ret, qqq_ret))}")
+    print(f"전략 vs QLD 누적 초과수익: {fmt_pct(cum_excess_ratio(strat_ret, qld_ret))}")
     print()
 
 
@@ -113,6 +142,10 @@ def section_alpha(df: pd.DataFrame) -> None:
     t_stat = mean_daily / (std_daily / np.sqrt(n)) if std_daily > 0 else 0
     p_value = 2 * (1 - stats.t.cdf(abs(t_stat), df=n - 1))
 
+    # ★ Newey-West HAC t-통계량: 일별 초과수익은 자기상관이 있어 i.i.d. t-test가
+    #   표준오차를 과소평가. HAC로 자기상관을 보정한 유의성도 함께 제시.
+    nw_t, nw_p = _newey_west_t(excess)
+
     ann_alpha = mean_daily * 252
     ann_vol = std_daily * np.sqrt(252)
     info_ratio = ann_alpha / ann_vol if ann_vol > 0 else 0
@@ -121,8 +154,9 @@ def section_alpha(df: pd.DataFrame) -> None:
     print(f"일별 초과수익 표준편차: {fmt_pct(std_daily)}")
     print(f"연환산 alpha (vs QQQ): {fmt_pct(ann_alpha)}")
     print(f"정보비율 (IR): {info_ratio:.2f}")
-    print(f"t-통계량: {t_stat:.2f}  (p-value: {p_value:.4f})")
-    print(f"  → {'유의미한 초과수익 (p<0.05)' if p_value < 0.05 else '통계적으로 유의미하지 않음 (p≥0.05)'}")
+    print(f"t-통계량 (i.i.d.): {t_stat:.2f}  (p-value: {p_value:.4f})")
+    print(f"t-통계량 (Newey-West HAC): {nw_t:.2f}  (p-value: {nw_p:.4f})")
+    print(f"  → {'유의미한 초과수익 (HAC p<0.05)' if nw_p < 0.05 else '통계적으로 유의미하지 않음 (HAC p≥0.05)'}")
     print()
 
     # 승률
@@ -174,9 +208,12 @@ def section_regime(df: pd.DataFrame) -> None:
     strat_ret = df["Strategy_Return"].fillna(0)
     qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
 
-    # Chosen_Asset 기반으로 국면 추정 (공격 자산 보유 = BULL)
+    # ★ 국면 기여도는 실행 포지션(Target_Asset) 기준으로 정렬해야 수익률과 일치.
+    #   Chosen_Asset(시그널)의 레짐을 shift(1)해서 실행일의 레짐으로 사용.
+    #   BIL은 BULL 안전피난처일 수 있으므로 자산명이 아닌 레짐 상태로 분류.
     attack_set = set(C.ATTACK_TICKERS)
-    regime = df["Chosen_Asset"].map(lambda a: "BULL" if a in attack_set else "BEAR")
+    chosen_regime = df["Chosen_Asset"].map(lambda a: "BULL" if a in attack_set else "BEAR")
+    regime = chosen_regime.shift(1).fillna("BEAR")
 
     for r in ["BULL", "BEAR"]:
         mask = regime == r
@@ -264,16 +301,19 @@ def section_excess_curve(df: pd.DataFrame) -> None:
 
     strat_ret = df["Strategy_Return"].fillna(0)
     qqq_ret = df[f"{C.REGIME_TICKER}_RetClose"].fillna(0)
-    excess = strat_ret - qqq_ret
-    cum_excess = (1 + excess).cumprod()
+    # ★ 정확한 상대부 비율 기반 초과수익 (산술차 복리화 대신)
+    strat_eq = (1 + strat_ret).cumprod()
+    bench_eq = (1 + qqq_ret).cumprod()
+    rel = strat_eq / bench_eq
+    cum_excess = rel
 
-    # 연도별 초과수익
-    yearly = excess.groupby(excess.index.year).apply(lambda r: (1 + r).prod() - 1)
+    # 연도별 초과수익 (상대부 비율의 연도별 변화)
+    yearly = rel.groupby(rel.index.year).apply(lambda r: r.iloc[-1] / r.iloc[0] - 1)
     print("연도별 초과수익 (전략 - QQQ):")
     for y, v in yearly.items():
         print(f"  {y}: {v:+.1%}")
     print()
-    print(f"전체 누적 초과수익: {(1 + excess).prod() - 1:+.1%}")
+    print(f"전체 누적 초과수익: {fmt_pct(rel.iloc[-1] - 1)}")
     print(f"초과수익 최대 낙폭: {(cum_excess / cum_excess.cummax() - 1).min():.1%}")
     print()
 
