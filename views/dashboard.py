@@ -26,7 +26,7 @@ BAD = "#b0442f"
 
 
 @st.cache_data(ttl=3600)
-def run_engine():
+def run_engine(_version: str = "v2"):
     data = engine.load_data()
     master = engine.build_master(data)
     df, info = engine.run_strategy(master)
@@ -56,14 +56,23 @@ def yearly_returns(ret):
 
 st.markdown("<style>div.block-container { padding-top: 2.6rem; }</style>", unsafe_allow_html=True)
 
+R = C.REGIME_TICKER
+ATTACK = C.ATTACK_TICKERS[0]
+
 try:
     df, info = run_engine()
 except Exception as e:
     st.error(f"엔진 실행 실패: {e}")
     st.stop()
 
-R = C.REGIME_TICKER
-ATTACK = C.ATTACK_TICKERS[0]
+# ★ 방어적 폴백: 낡은 캐시/데이터로 {R}_RetClose 같은 파생 컬럼이 없어도
+#   KeyError 로 화면 전체가 죽지 않도록 벤치마크 수익률을 직접 산출한다.
+if f"{R}_RetClose" not in df.columns:
+    df[f"{R}_RetClose"] = df[f"{R}_Close"].pct_change()
+if f"{ATTACK}_RetClose" not in df.columns:
+    df[f"{ATTACK}_RetClose"] = df[f"{ATTACK}_Close"].pct_change()
+if "Strategy_Return" not in df.columns:
+    df["Strategy_Return"] = 0.0
 
 strat_ret = df["Strategy_Return"].fillna(0)
 qqq_ret = df[f"{R}_RetClose"].fillna(0)
